@@ -1,0 +1,3 @@
+const {app,BrowserWindow}=require('electron');const {spawn}=require('node:child_process');const path=require('node:path');let api;
+function create(){const win=new BrowserWindow({width:1440,height:920,minWidth:1050,minHeight:700,backgroundColor:'#090b12',webPreferences:{contextIsolation:true,nodeIntegration:false}});if(!app.isPackaged)win.loadURL('http://127.0.0.1:5173');else win.loadFile(path.join(__dirname,'../dist/index.html'));}
+app.whenReady().then(()=>{api=spawn(process.env.PYTHON||'python',['-m','uvicorn','backend.main:app','--host','127.0.0.1','--port','8765'],{cwd:app.getAppPath(),stdio:'ignore',windowsHide:true});create()});app.on('window-all-closed',()=>{api?.kill();if(process.platform!=='darwin')app.quit()});
