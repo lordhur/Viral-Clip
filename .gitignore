@@ -1,0 +1,11 @@
+node_modules/
+dist/
+tsconfig.tsbuildinfo
+__pycache__/
+*.py[cod]
+.venv/
+.env
+.viral-hit-version
+*.db
+output/
+temp/
