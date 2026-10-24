@@ -74,7 +74,7 @@ def set_video(vid, status, progress, error=None, path=None, stage=None, speed=No
         db.commit()
 
 
-def run(cmd, timeout=3600, job_id=None, download=False):
+def run(cmd, timeout=3600, job_id=None, download=False, capture_all=False):
     try:
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                text=True, encoding='utf-8', errors='replace', bufsize=1)
@@ -86,7 +86,7 @@ def run(cmd, timeout=3600, job_id=None, download=False):
         if proc.stdout:
             for line in proc.stdout:
                 output.append(line)
-                if len(output) > 80:
+                if not capture_all and len(output) > 80:
                     output.pop(0)
                 if download and job_id:
                     match = re.search(r'(\d+(?:\.\d+)?)%', line)
@@ -115,18 +115,21 @@ def run(cmd, timeout=3600, job_id=None, download=False):
 
 
 def detect_audio_activity(source, duration, vid):
-    """Return non-silent spans from local audio energy analysis, not word transcription."""
+    """Measure silence and audio-energy peaks; this is not speech recognition."""
     probe = run(['ffprobe', '-v', 'error', '-select_streams', 'a:0', '-show_entries', 'stream=index', '-of', 'csv=p=0', str(source)])
     if not probe.stdout.strip():
-        return []
+        return [], []
+    metrics_path = DATA / f'audio-levels-{uuid.uuid4().hex}.txt'
+    escaped_metrics_path = metrics_path.as_posix().replace(':', r'\:')
+    audio_filter = (f"silencedetect=noise=-35dB:d=0.30,ebur128=metadata=1,"
+                    f"ametadata=print:file='{escaped_metrics_path}'")
     result = run(['ffmpeg', '-hide_banner', '-loglevel', 'info', '-nostats', '-i', str(source), '-vn',
-                  '-af', 'silencedetect=noise=-35dB:d=0.30', '-f', 'null', '-'], job_id=vid)
+                  '-af', audio_filter, '-f', 'null', '-'], job_id=vid, capture_all=True)
     if vid in CANCELLED:
-        return []
+        metrics_path.unlink(missing_ok=True)
+        return [], []
     silence_starts = [float(m) for m in re.findall(r'silence_start:\s*(-?\d+(?:\.\d+)?)', result.stdout)]
     silence_ends = [float(m) for m in re.findall(r'silence_end:\s*(-?\d+(?:\.\d+)?)', result.stdout)]
-    if not silence_starts and not silence_ends:
-        return [(0.0, duration)]
     silent = []
     for i, start in enumerate(silence_starts):
         end = silence_ends[i] if i < len(silence_ends) else duration
@@ -139,7 +142,35 @@ def detect_audio_activity(source, duration, vid):
         cursor = max(cursor, end)
     if duration > cursor + .08:
         active.append((cursor, duration))
-    return active or [(0.0, duration)]
+    if not active:
+        active = [(0.0, duration)]
+
+    # Read EBU R128's 400 ms momentary loudness from a metadata sidecar; don't
+    # depend on a truncated FFmpeg console log for long recordings.
+    try:
+        metrics_text = metrics_path.read_text(encoding='utf-8', errors='replace')
+    except OSError:
+        metrics_text = ''
+    finally:
+        metrics_path.unlink(missing_ok=True)
+    levels = [(float(t), float(v)) for t, v in re.findall(
+        r'pts_time:([\d.]+)\s+lavfi\.r128\.M=(-?[\d.]+)', metrics_text)]
+    peaks = []
+    if len(levels) >= 3:
+        ordered = sorted(v for _, v in levels if v > -90)
+        if ordered:
+            threshold = max(-38.0, ordered[len(ordered) // 2] + 4.0)
+            candidates = []
+            for i in range(1, len(levels) - 1):
+                t, level = levels[i]
+                if level >= threshold and level >= levels[i-1][1] and level > levels[i+1][1]:
+                    candidates.append((level, t))
+            chosen = []
+            for level, t in sorted(candidates, reverse=True):
+                if all(abs(t - prior_t) >= 1.6 for _, prior_t in chosen):
+                    chosen.append((level, t))
+            peaks = sorted(t for _, t in chosen)
+    return active, peaks
 
 
 def fallback_webcam_region(source, position='bottom_left'):
@@ -151,8 +182,8 @@ def fallback_webcam_region(source, position='bottom_left'):
         width, height = int(stream['width']), int(stream['height'])
     except Exception:
         return None
-    aspect = 1080 / 520
-    crop_w = min(width, int(width * .30))
+    aspect = 1080 / 700
+    crop_w = min(width, int(width * .38))
     crop_h = min(height, int(crop_w / aspect))
     x = width - crop_w if position.endswith('right') else 0
     y = 0 if position.startswith('top') else height - crop_h
@@ -174,7 +205,7 @@ def analyze(vid, min_duration=12, max_duration=35, clip_count=0, output_format='
             raise RuntimeError(f'Vidéo trop courte : {duration:.1f}s (minimum demandé : {min_duration}s).')
 
         set_video(vid, 'Analyse en cours', 44, stage='Analyse audio · détection des silences et pics sonores')
-        audio_activity = detect_audio_activity(source, duration, vid)
+        audio_activity, audio_peaks = detect_audio_activity(source, duration, vid)
         if vid in CANCELLED:
             return
 
@@ -189,7 +220,9 @@ def analyze(vid, min_duration=12, max_duration=35, clip_count=0, output_format='
             if end - start >= min_duration:
                 active_seconds = sum(max(0.0, min(end, b) - max(start, a)) for a, b in audio_activity)
                 active_ratio = active_seconds / max(1.0, end - start)
-                score = min(98, 42 + int((end - start) / 3) + ((start // 7) % 14) + int(active_ratio * 28))
+                peak_count = sum(start <= peak <= end for peak in audio_peaks)
+                # Heuristic ranking: retain audible passages and favor energetic moments.
+                score = min(98, 45 + int((end - start) / 4) + int(active_ratio * 20) + min(20, peak_count * 3))
                 candidates.append((start, end, score))
         if not candidates:
             candidates = [(0, duration, min(90, 55 + int(duration / 3)))]
@@ -216,7 +249,7 @@ def analyze(vid, min_duration=12, max_duration=35, clip_count=0, output_format='
             # Keep audible phrases and collapse pauses longer than 0.35 s into real jump cuts.
             keep = []
             for active_start, active_end in audio_activity:
-                left, right = max(start, active_start - .12), min(end, active_end + .12)
+                left, right = max(start, active_start - .18), min(end, active_end + .18)
                 if right <= left:
                     continue
                 if keep and left - keep[-1][1] <= .35:
@@ -252,41 +285,63 @@ def analyze(vid, min_duration=12, max_duration=35, clip_count=0, output_format='
                 if audio_activity:
                     cut_graph_parts.append('[a0]anull[cuta]')
             cut_graph=';'.join(cut_graph_parts)
-            export_start=keep[0][0]
-            export_end=export_start+kept_seconds
-            if face_box:
+            # Translate source-time energy peaks into the concatenated output timeline.
+            event_times = []
+            output_offset = 0.0
+            for a, b in keep:
+                event_times.extend(output_offset + peak - a for peak in audio_peaks if a <= peak <= b)
+                output_offset += b - a
+            if not event_times:
+                cursor = 0.0
+                for a, b in keep:
+                    event_times.append(cursor + (b - a) / 2)
+                    cursor += b - a
+            event_times = sorted(set(max(0.0, min(kept_seconds - .05, t)) for t in event_times))[:6]
+            pulses = [f'max(0,1-abs(on-{round(t * 30)})/48)' for t in event_times]
+            pulse = pulses[0]
+            for next_pulse in pulses[1:]:
+                pulse = f'max({pulse},{next_pulse})'
+            zoom = f'1+0.30*({pulse})'
+            camera_layout = bool(face_box)
+            if camera_layout:
                 x, y, cw, ch = face_box
                 graph = (f'[cutv]split=2[cam][game];[cam]crop={cw}:{ch}:{x}:{y},'
-                         'scale=1080:520:force_original_aspect_ratio=increase,crop=1080:520[camtop];'
-                         ' [game]scale=1080:1400:force_original_aspect_ratio=increase,crop=1080:1400[gameplay];'
-                         '[camtop][gameplay]vstack=inputs=2,setsar=1[layout]')
-                basic_video = 'scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1'
+                         'scale=1080:700:force_original_aspect_ratio=increase,crop=1080:700[camtop];'
+                         '[game]scale=1080:1220:force_original_aspect_ratio=increase,crop=1080:1220[gamebase]')
+                base_graph = graph + ';[camtop][gamebase]vstack=inputs=2,setsar=1[baseout]'
+                zoom_graph = (graph + f";[gamebase]fps=30,zoompan=z='{zoom}':d=1:s=1080x1190:fps=30[gamezoom];"
+                              '[camtop][gamezoom]vstack=inputs=2,setsar=1[renderbase]')
                 if face_detected:
-                    camera_note = 'Webcam détectée · caméra en haut'
-            elif output_format == 'horizontal':
-                graph = '[cutv]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1[layout]'
-                basic_video = 'scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1'
-                camera_note = 'Format horizontal · cadrage source'
+                    camera_note = 'Webcam détectée · caméra entière en haut (38%)'
             else:
-                graph = '[cutv]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1[layout]'
-                basic_video = 'scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1'
-                camera_note = 'Webcam non détectée · cadrage vertical centré'
-            width, height = (1920, 1080) if output_format == 'horizontal' else (1080, 1920)
+                if output_format == 'horizontal':
+                    graph = '[cutv]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1[layout]'
+                    camera_note = 'Format horizontal · cadrage source'
+                    width, height = 1920, 1080
+                else:
+                    graph = '[cutv]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1[layout]'
+                    camera_note = 'Webcam non détectée · cadrage vertical centré'
+                    width, height = 1080, 1920
+                base_graph = graph + ';[layout]null[baseout]'
+                zoom_graph = (graph + f";[layout]fps=30,zoompan=z='{zoom}':d=1:s={width}x{height}:fps=30[renderbase]")
             caption = 'EPIC !' if score >= 80 else ('WOW ?!' if score >= 65 else 'MOMENT FORT')
-            zoom = "if(lte(on,48),1+0.0033*on,if(lte(on,150),1.158,max(1.02,1.158-0.00032*(on-150))))"
-            zoom_only_video = (f"{graph};[layout]fps=30,zoompan=z='{zoom}':d=1:s={width}x{height}:fps=30,"
-                               "eq=saturation=1.08:contrast=1.03,drawbox=x=0:y=0:w=iw:h=ih:color=white@0.22:t=fill:enable='between(t,0.20,0.34)'[vout]")
-            advanced_video = (f"{graph};[layout]fps=30,zoompan=z='{zoom}':d=1:s={width}x{height}:fps=30,"
-                              f"eq=saturation=1.10:contrast=1.05,drawbox=x=0:y=0:w=iw:h=ih:color=white@0.22:t=fill:enable='between(t,0.20,0.34)',drawtext=text='{caption}':fontcolor=white:fontsize=88:"
+            zoom_only_video = (f"{zoom_graph};[renderbase]eq=saturation=1.08:contrast=1.03,"
+                               "drawbox=x=0:y=0:w=iw:h=ih:color=white@0.22:t=fill:enable='between(t,0.20,0.34)'[vout]")
+            advanced_video = (f"{zoom_graph};[renderbase]eq=saturation=1.10:contrast=1.05,"
+                              f"drawbox=x=0:y=0:w=iw:h=ih:color=white@0.22:t=fill:enable='between(t,0.20,0.34)',drawtext=text='{caption}':fontcolor=white:fontsize=88:"
                               "borderw=6:bordercolor=black:box=1:boxcolor=black@0.40:boxborderw=18:"
                               "x=(w-text_w)/2:y=h*0.26:enable='between(t,0.25,2.8)'[vout]")
             set_video(vid, f'Montage {index + 1}/{len(selected)}', 58 + int(index / max(1, len(selected)) * 38), stage=camera_note)
             sfx_path = DATA / ('impact_heavy_v2.wav' if score >= 75 else 'impact_soft_v2.wav')
             make_impact_sound(sfx_path, low=score < 75)
+            delay_ms = int(min(max(0.0, kept_seconds - .1), event_times[0]) * 1000)
             if audio_activity:
-                audio_filter = "[cuta]loudnorm=I=-16:TP=-1.5:LRA=11[a0];[1:a]volume=0.85,adelay=420|420[fx];[a0][fx]amix=inputs=2:duration=first:dropout_transition=0:weights='1 1.45':normalize=0,alimiter=limit=0.96[aout]"
+                audio_filter = (f"[cuta]loudnorm=I=-16:TP=-1.5:LRA=11[a0];[1:a]volume=1.0,"
+                                f"adelay={delay_ms}|{delay_ms}[fx];[a0][fx]amix=inputs=2:duration=first:"
+                                "dropout_transition=0:weights='1 1.65':normalize=0,alimiter=limit=0.96[aout]")
             else:
-                audio_filter = f'[1:a]volume=0.85,adelay=420|420,apad=pad_dur={kept_seconds:.3f},atrim=duration={kept_seconds:.3f}[aout]'
+                audio_filter = (f'[1:a]volume=1.0,adelay={delay_ms}|{delay_ms},apad=pad_dur={kept_seconds:.3f},'
+                                f'atrim=duration={kept_seconds:.3f}[aout]')
             common = ['ffmpeg', '-hide_banner', '-loglevel', 'error', '-y', '-ss', f'{start:.3f}', '-i', str(source),
                       '-i', str(sfx_path), '-t', f'{kept_seconds:.3f}', '-filter_complex', cut_graph + ';' + advanced_video + ';' + audio_filter,
                       '-map', '[vout]', '-map', '[aout]', '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart']
@@ -305,7 +360,7 @@ def analyze(vid, min_duration=12, max_duration=35, clip_count=0, output_format='
                 result = run(zoom_fallback, job_id=vid)
             if result.returncode:
                 # Last resort only: preserve a playable vertical/horizontal render.
-                simple_graph = f'[cutv]{basic_video},fps=30[vout];{audio_filter}'
+                simple_graph = base_graph + ';[baseout]fps=30[vout];' + audio_filter
                 fallback = ['ffmpeg', '-hide_banner', '-loglevel', 'error', '-y', '-ss', f'{start:.3f}', '-i', str(source),
                             '-i', str(sfx_path), '-t', f'{kept_seconds:.3f}', '-filter_complex', cut_graph + ';' + simple_graph,
                             '-map', '[vout]', '-map', '[aout]', '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart',

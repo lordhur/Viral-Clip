@@ -69,10 +69,11 @@ def find_webcam_region(video_path: Path, start_seconds: float, duration: float):
         x0, y0 = min(f[0] for f in faces), min(f[1] for f in faces)
         x1, y1 = max(f[0] + f[2] for f in faces), max(f[1] + f[3] for f in faces)
         face_w, face_h = max(f[2] for f in faces), max(f[3] for f in faces)
-        aspect = 1080 / 520
+        aspect = 1080 / 730
         center_x, center_y = (x0+x1)/2, (y0+y1)/2
-        cw = max((x1-x0) + face_w*2.0, face_w*4.2)
-        ch = max((y1-y0) + face_h*1.8, face_h*2.6)
+        # Capture the whole webcam box around the detected face, not a tight headshot.
+        cw = max((x1-x0) + face_w*3.0, face_w*5.5, width*.34)
+        ch = max((y1-y0) + face_h*2.4, face_h*4.0, cw/aspect)
         cw = max(cw, ch*aspect)
         ch = cw/aspect
         if cw > width:
