@@ -6,15 +6,17 @@ title Mise a jour Viral Hit
 git rev-parse --is-inside-work-tree >nul 2>nul
 if not errorlevel 1 goto git_update
 
+where python >nul 2>nul
+if errorlevel 1 (echo Python est introuvable dans le PATH.& pause& exit /b 1)
 if not exist "update.py" call :bootstrap
 if errorlevel 1 (
-  echo La mise a jour initiale a echoue.
+  echo ECHEC lors de l'initialisation ZIP. Le detail est indique ci-dessus.
   pause
   exit /b 1
 )
 python update.py
 if errorlevel 1 (
-  echo La mise a jour a echoue. Verifiez votre connexion puis reessayez.
+  echo ECHEC lors de la mise a jour incrementale. Verifiez la connexion puis reessayez.
   pause
   exit /b 1
 )
@@ -23,38 +25,26 @@ goto install_deps
 :git_update
 echo Mise a jour Git de Viral Hit...
 git pull --ff-only origin arena/2e402653-viral-clip
-if errorlevel 1 (
-  echo La mise a jour Git a echoue.
-  pause
-  exit /b 1
-)
+if errorlevel 1 (echo La mise a jour Git a echoue.& pause& exit /b 1)
 goto install_deps
 
 :bootstrap
-echo Ce dossier est une archive ZIP. Initialisation automatique unique...
-where curl.exe >nul 2>nul || (echo curl.exe est requis sur Windows 10/11.& exit /b 1)
+echo Dossier ZIP detecte. Initialisation automatique unique...
+where curl.exe >nul 2>nul
+if errorlevel 1 (echo ECHEC: curl.exe introuvable. Windows 10/11 ou ulterieur est requis.& exit /b 1)
 set "WORK=%TEMP%\ViralHitBootstrap_%RANDOM%"
 set "ZIP=%WORK%\source.zip"
-set "UNPACK=%WORK%\unpacked"
-echo Dossier local : %CD%
 mkdir "%WORK%" >nul 2>nul
-mkdir "%UNPACK%" >nul 2>nul
 curl.exe -fL --retry 3 --output "%ZIP%" "https://codeload.github.com/lordhur/Viral-Clip/zip/refs/heads/arena/2e402653-viral-clip"
-if errorlevel 1 (echo ECHEC: telechargement GitHub. Verifiez votre connexion.& exit /b 1)
-python -c "import zipfile,sys; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])" "%ZIP%" "%UNPACK%"
-if errorlevel 1 (echo ECHEC: extraction Python de l'archive ZIP.& exit /b 1)
-for /d %%D in ("%UNPACK%\Viral-Clip-*") do call :copy_source "%%~fD"
-if errorlevel 1 (echo ECHEC: copie des fichiers. Fermez Viral Hit et relancez ce script.& exit /b 1)
+if errorlevel 1 (echo ECHEC: impossible de telecharger l'archive GitHub.& exit /b 1)
+echo Archive recue. Extraction avec Python...
+python -c "import sys,zipfile,pathlib; z=zipfile.ZipFile(sys.argv[1]); root=pathlib.Path(sys.argv[2]); top=next(n.split('/')[0] for n in z.namelist() if '/' in n); skip={'.git','node_modules','dist','build','coverage','.venv','__pycache__','output','temp'}; [( (root/rel).parent.mkdir(parents=True,exist_ok=True), (root/rel).write_bytes(z.read(n))) for n in z.namelist() if n.startswith(top+'/') and not n.endswith('/') and (rel:=n[len(top)+1:]) and pathlib.PurePosixPath(rel).parts[0] not in skip]" "%ZIP%" "%~dp0"
+if errorlevel 1 (echo ECHEC: Python n'a pas pu extraire les fichiers de l'archive.& exit /b 1)
 if not exist "update.py" (echo ECHEC: update.py absent apres extraction.& exit /b 1)
 python update.py --record-current
-if errorlevel 1 (echo ECHEC: impossible d'enregistrer la version GitHub courante.& exit /b 1)
+if errorlevel 1 (echo ECHEC: GitHub n'a pas repondu lors de la verification de version.& exit /b 1)
 rmdir /s /q "%WORK%" >nul 2>nul
 echo Initialisation terminee. Les prochaines mises a jour ne telechargeront que les fichiers modifies.
-exit /b 0
-
-:copy_source
-robocopy "%~1" "%~dp0" /E /R:2 /W:1 /NFL /NDL /NJH /NJS /NP /XD .git node_modules dist build coverage .venv __pycache__ output temp /XF "Mettre a jour Viral Hit.bat"
-if errorlevel 8 exit /b 1
 exit /b 0
 
 :install_deps
