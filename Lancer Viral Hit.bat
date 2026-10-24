@@ -33,6 +33,17 @@ if errorlevel 1 (
   )
 )
 
+if not exist "%LOCALAPPDATA%\ViralHit\vision_install_checked.flag" (
+  python -c "import cv2" >nul 2>nul
+  if errorlevel 1 (
+    echo Installation optionnelle de la detection de webcam...
+    python -m pip install --user -r requirements-vision.txt
+    if errorlevel 1 echo OpenCV non disponible pour cette version de Python; les clips seront recadres sans detection webcam.
+  )
+  if not exist "%LOCALAPPDATA%\ViralHit" mkdir "%LOCALAPPDATA%\ViralHit"
+  echo checked>"%LOCALAPPDATA%\ViralHit\vision_install_checked.flag"
+)
+
 if not exist "node_modules\electron\dist\electron.exe" (
   echo Installation des dependances de l'application, une seule fois...
   call npm.cmd install

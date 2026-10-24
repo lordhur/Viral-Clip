@@ -1,22 +1,23 @@
 # Viral Hit
 
-Application desktop locale de création de clips. L'interface utilise React, TypeScript, Vite et Framer Motion ; le service local utilise FastAPI, SQLite, FFmpeg et yt-dlp. Les médias sont conservés dans `%USERPROFILE%\.viral-hit` (Windows) ou `~/.viral-hit`.
+Application desktop locale en développement. Interface React/TypeScript avec Electron ; API FastAPI, base SQLite et média stockés localement dans `%USERPROFILE%\.viral-hit` (Windows) ou `~/.viral-hit`.
 
 ## Démarrage Windows
 
-1. Installer Node.js 20+, Python 3.10+ et FFmpeg (avec `ffprobe`) puis ajouter leurs commandes au PATH. `yt-dlp` est installé par le script s'il manque.
-2. Exécuter `install.bat`.
-3. Dans le dossier du projet : `npm run dev` pour lancer l'interface web, puis dans un second terminal `python -m uvicorn backend.main:app --host 127.0.0.1 --port 8765`.
-4. `npm run electron:dev` lance l'interface Electron/Vite. Pour le moment, le backend se lance séparément en développement.
+Prérequis : Node.js 20+, Python, FFmpeg avec `ffprobe`. Placez le dossier dans un emplacement permanent. `Lancer Viral Hit.bat` démarre Electron et son backend, installe les dépendances Python/Node si elles manquent et tente d'installer OpenCV (facultatif) pour la détection de visages. Pour créer un raccourci : clic droit sur le fichier `.bat` → Créer un raccourci.
 
-## Fonctions incluses
+Pour une copie Git, `Mettre a jour Viral Hit.bat` récupère les nouveautés sans télécharger tout le dépôt en archive. Le script nécessite une copie Git et une connexion internet.
 
-Import vidéo local (lecture en blocs), import yt-dlp, SQLite, traitement asynchrone, création de clips distincts, encodage NVENC avec repli x264, recadrage vertical, lecture intégrée, téléchargement, notes, activité, statistiques et stockage de créneaux de planification. La déduplication applique une limite stricte de recouvrement temporel à 30 %.
+## Fonctions actuelles
 
-## Limites honnêtes
+Import vidéo avec progression réelle côté interface (pourcentage, vitesse, estimation), téléchargements yt-dlp avec progression, suivi des étapes d'analyse et de montage, arrêt d'un transfert, arrêt/suppression d'une tâche, suppression d'une analyse terminée avec ses clips et sa source, réglages du nombre/durée/format, encodage NVENC avec repli x264, lecteur des clips, notes et planification locale. Le montage applique un zoom progressif, une courte accroche textuelle et un impact sonore synthétisé localement.
 
-Cette première version est un socle exécutable, pas la réalisation intégrale du cahier des charges. La sélection des extraits est une segmentation heuristique uniforme : aucune inférence Whisper/YOLO/CLIP/Silero, détection webcam/HUD, sous-titrage, mèmes, apprentissage de modèle, vues calendrier avancées ou publication réseau ne sont prétendus actifs. La planification enregistre des créneaux mais ne publie pas. L'import peut accepter de gros fichiers, mais l'interface ne montre pas encore une progression réelle de transfert. NVENC est utilisé si FFmpeg est compilé avec le codec et si le pilote GPU le permet ; sinon l'export bascule sur x264. Les API de réseaux sociaux requièrent des comptes et autorisations de plateforme et ne sont pas contournées.
+La détection du visage de webcam est best-effort et optionnelle (OpenCV Haar). Si OpenCV ne s'installe pas, ou si aucun visage persistant n'est détecté dans le même emplacement, Viral Hit utilise le recadrage vertical central. Aucun système ne peut garantir l'extraction correcte de webcam pour toute vidéo sans un détecteur spécialisé et/ou une validation utilisateur.
 
-## Vérification
+## Limites à connaître
 
-`GET http://127.0.0.1:8765/api/health` vérifie la présence de FFmpeg. Endpoints principaux : `/api/import`, `/api/link`, `/api/videos`, `/api/clips`, `/api/stats`, `/api/planning`.
+Les moments sélectionnés sont des fenêtres uniformes heuristiques, pas des moments sémantiquement détectés par Whisper, YOLO ou CLIP. Les accroches et le son généré sont des effets originaux génériques, pas une bibliothèque de mèmes/samples téléchargés ni une compréhension du contexte de chaque clip. Il n'y a pas encore de sous-titres transcrits, de détection HUD/jeu, de publication réseau, ni de calendrier interactif complet. La planification enregistre des créneaux, mais ne publie pas. L'API de publication n'est pas contournée.
+
+## Backend séparé (diagnostic)
+
+`python -m uvicorn backend.main:app --host 127.0.0.1 --port 8765` démarre l'API manuellement si nécessaire. `GET http://127.0.0.1:8765/api/health` indique la disponibilité de FFmpeg, yt-dlp et OpenCV.
