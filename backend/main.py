@@ -13,7 +13,7 @@ import sys
 import threading
 import time
 import uuid
-from backend.vision import find_webcam_region
+from backend.vision import find_webcam_region, webcam_supported
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA = Path.home() / '.viral-hit'
@@ -180,18 +180,21 @@ def analyze(vid, min_duration=12, max_duration=35, clip_count=0, output_format='
                 camera_note = 'Webcam non détectée · cadrage vertical centré'
             width, height = (1920, 1080) if output_format == 'horizontal' else (1080, 1920)
             caption = 'EPIC !' if score >= 80 else ('WOW ?!' if score >= 65 else 'MOMENT FORT')
-            zoom = "if(lte(on,45),1+0.0017*on,if(lte(on,105),1.076,1.076-0.0004*(on-105)))"
+            zoom = "if(lte(on,48),1+0.0033*on,if(lte(on,150),1.158,max(1.02,1.158-0.00032*(on-150))))"
+            zoom_only_video = (f"{graph};[layout]fps=30,zoompan=z='{zoom}':d=1:s={width}x{height}:fps=30,"
+                               "eq=saturation=1.08:contrast=1.03,drawbox=x=0:y=0:w=iw:h=ih:color=white@0.22:t=fill:enable='between(t,0.20,0.34)'[vout]")
             advanced_video = (f"{graph};[layout]fps=30,zoompan=z='{zoom}':d=1:s={width}x{height}:fps=30,"
-                              f"eq=saturation=1.08:contrast=1.03,drawtext=text='{caption}':fontcolor=white:fontsize=72:"
-                              "borderw=5:bordercolor=black:x=(w-text_w)/2:y=h*0.28:enable='between(t,0.45,1.65)'[vout]")
+                              f"eq=saturation=1.10:contrast=1.05,drawbox=x=0:y=0:w=iw:h=ih:color=white@0.22:t=fill:enable='between(t,0.20,0.34)',drawtext=text='{caption}':fontcolor=white:fontsize=88:"
+                              "borderw=6:bordercolor=black:box=1:boxcolor=black@0.40:boxborderw=18:"
+                              "x=(w-text_w)/2:y=h*0.26:enable='between(t,0.25,2.8)'[vout]")
             set_video(vid, f'Montage {index + 1}/{len(selected)}', 58 + int(index / max(1, len(selected)) * 38), stage=camera_note)
-            sfx_path = DATA / ('impact_heavy.wav' if score >= 75 else 'impact_soft.wav')
+            sfx_path = DATA / ('impact_heavy_v2.wav' if score >= 75 else 'impact_soft_v2.wav')
             make_impact_sound(sfx_path, low=score < 75)
             audio_probe = run(['ffprobe', '-v', 'error', '-select_streams', 'a:0', '-show_entries', 'stream=index', '-of', 'csv=p=0', str(source)])
             if audio_probe.stdout.strip():
-                audio_filter = '[0:a]loudnorm=I=-16:TP=-1.5:LRA=11[a0];[1:a]volume=0.28,adelay=850|850[fx];[a0][fx]amix=inputs=2:duration=first:dropout_transition=0[aout]'
+                audio_filter = "[0:a]loudnorm=I=-16:TP=-1.5:LRA=11[a0];[1:a]volume=0.85,adelay=420|420[fx];[a0][fx]amix=inputs=2:duration=first:dropout_transition=0:weights='1 1.45':normalize=0,alimiter=limit=0.96[aout]"
             else:
-                audio_filter = f'[1:a]volume=0.28,adelay=850|850,apad=pad_dur={end-start:.3f},atrim=duration={end-start:.3f}[aout]'
+                audio_filter = f'[1:a]volume=0.85,adelay=420|420,apad=pad_dur={end-start:.3f},atrim=duration={end-start:.3f}[aout]'
             common = ['ffmpeg', '-hide_banner', '-loglevel', 'error', '-y', '-ss', f'{start:.3f}', '-i', str(source),
                       '-i', str(sfx_path), '-t', f'{end-start:.3f}', '-filter_complex', advanced_video + ';' + audio_filter,
                       '-map', '[vout]', '-map', '[aout]', '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart']
@@ -203,6 +206,13 @@ def analyze(vid, min_duration=12, max_duration=35, clip_count=0, output_format='
                 cmd = common + ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', str(output)]
                 result = run(cmd, job_id=vid)
             if result.returncode:
+                # If drawtext is unavailable, retain the moving zoom and audio effect.
+                zoom_common = common.copy()
+                zoom_common[zoom_common.index('-filter_complex') + 1] = zoom_only_video + ';' + audio_filter
+                zoom_fallback = zoom_common + ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', str(output)]
+                result = run(zoom_fallback, job_id=vid)
+            if result.returncode:
+                # Last resort only: preserve a playable vertical/horizontal render.
                 simple_graph = f'[0:v]{basic_video},fps=30[vout];{audio_filter}'
                 fallback = ['ffmpeg', '-hide_banner', '-loglevel', 'error', '-y', '-ss', f'{start:.3f}', '-i', str(source),
                             '-i', str(sfx_path), '-t', f'{end-start:.3f}', '-filter_complex', simple_graph,
@@ -414,4 +424,4 @@ def schedule(post: Post):
 def health():
     return {'ok': True, 'ffmpeg': shutil.which('ffmpeg') is not None,
             'yt_dlp': importlib.util.find_spec('yt_dlp') is not None,
-            'webcam_detection': importlib.util.find_spec('cv2') is not None}
+            'webcam_detection': webcam_supported()}

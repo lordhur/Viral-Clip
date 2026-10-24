@@ -5,6 +5,16 @@ import logging
 
 log = logging.getLogger(__name__)
 
+def webcam_supported():
+    try:
+        import cv2
+        if not all(hasattr(cv2, name) for name in ('CascadeClassifier', 'VideoCapture', 'cvtColor')):
+            return False
+        cascade_path = Path(cv2.data.haarcascades) / 'haarcascade_frontalface_default.xml'
+        return cascade_path.is_file()
+    except Exception:
+        return False
+
 def find_webcam_region(video_path: Path, start_seconds: float, duration: float):
     cap = None
     try:
@@ -34,12 +44,12 @@ def find_webcam_region(video_path: Path, start_seconds: float, duration: float):
             scale = min(1.0, 960 / width)
             small = cv2.resize(frame, (int(width * scale), int(height * scale))) if scale < 1 else frame
             gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
-            faces = detector.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5,
-                minSize=(max(30, int(small.shape[1] * .035)), max(30, int(small.shape[0] * .035))))
+            faces = detector.detectMultiScale(gray, scaleFactor=1.06, minNeighbors=3,
+                minSize=(max(20, int(small.shape[1] * .022)), max(20, int(small.shape[0] * .022))))
             for x, y, w, h in faces:
                 if w < small.shape[1] * .38 and h < small.shape[0] * .55:
                     samples.append((x / scale, y / scale, w / scale, h / scale))
-        if len(samples) < 3:
+        if len(samples) < 2:
             return None
         clusters = []
         radius = math.hypot(width, height) * .12
@@ -53,14 +63,24 @@ def find_webcam_region(video_path: Path, start_seconds: float, duration: float):
                 cluster['cx'] = sum(f[0] + f[2]/2 for f in cluster['faces']) / len(cluster['faces'])
                 cluster['cy'] = sum(f[1] + f[3]/2 for f in cluster['faces']) / len(cluster['faces'])
         best = max(clusters, key=lambda c: len(c['faces']))
-        if len(best['faces']) < 3:
+        if len(best['faces']) < 2:
             return None
         faces = best['faces']
         x0, y0 = min(f[0] for f in faces), min(f[1] for f in faces)
         x1, y1 = max(f[0] + f[2] for f in faces), max(f[1] + f[3] for f in faces)
         face_w, face_h = max(f[2] for f in faces), max(f[3] for f in faces)
-        cw, ch = min(width, max(x1-x0, face_w*2.8)), min(height, max(y1-y0, face_h*2.8))
-        cx, cy = max(0, min(width-cw, (x0+x1-cw)/2)), max(0, min(height-ch, (y0+y1-ch)/2))
+        aspect = 1080 / 520
+        center_x, center_y = (x0+x1)/2, (y0+y1)/2
+        cw = max((x1-x0) + face_w*2.0, face_w*4.2)
+        ch = max((y1-y0) + face_h*1.8, face_h*2.6)
+        cw = max(cw, ch*aspect)
+        ch = cw/aspect
+        if cw > width:
+            cw = width; ch = cw/aspect
+        if ch > height:
+            ch = height; cw = ch*aspect
+        cx = max(0, min(width-cw, center_x-cw/2))
+        cy = max(0, min(height-ch, center_y-ch*.38))
         return tuple(int(round(v)) for v in (cx, cy, cw, ch))
     except Exception:
         log.exception('Webcam/face detection failed; falling back to a center crop.')
