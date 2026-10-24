@@ -34,14 +34,24 @@ if errorlevel 1 (
 )
 
 if not exist "%LOCALAPPDATA%\ViralHit\vision_install_checked.flag" (
-  python -c "import cv2" >nul 2>nul
+  python -c "import cv2; assert hasattr(cv2, 'CascadeClassifier')" >nul 2>nul
   if errorlevel 1 (
-    echo Installation optionnelle de la detection de webcam...
-    python -m pip install --user -r requirements-vision.txt
-    if errorlevel 1 echo OpenCV non disponible pour cette version de Python; les clips seront recadres sans detection webcam.
+    echo Installation optionnelle ou reparation de la detection webcam...
+    python -m pip install --user --upgrade --force-reinstall -r requirements-vision.txt
+    if errorlevel 1 echo OpenCV non disponible; les clips seront recadres sans detection webcam.
   )
   if not exist "%LOCALAPPDATA%\ViralHit" mkdir "%LOCALAPPDATA%\ViralHit"
   echo checked>"%LOCALAPPDATA%\ViralHit\vision_install_checked.flag"
+  echo checked>"%LOCALAPPDATA%\ViralHit\vision_repair_attempted.flag"
+)
+
+python -c "import cv2; assert hasattr(cv2, 'CascadeClassifier')" >nul 2>nul
+if errorlevel 1 if not exist "%LOCALAPPDATA%\ViralHit\vision_repair_attempted.flag" (
+  echo OpenCV est incomplet; tentative de reinstallation pour activer la detection webcam...
+  python -m pip install --user --upgrade --force-reinstall -r requirements-vision.txt
+  if errorlevel 1 echo OpenCV reste indisponible; l'analyse continuera avec un recadrage vertical standard.
+  if not exist "%LOCALAPPDATA%\ViralHit" mkdir "%LOCALAPPDATA%\ViralHit"
+  echo checked>"%LOCALAPPDATA%\ViralHit\vision_repair_attempted.flag"
 )
 
 if not exist "node_modules\electron\dist\electron.exe" (
