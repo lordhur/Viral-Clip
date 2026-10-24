@@ -190,6 +190,30 @@ def fallback_webcam_region(source, position='bottom_left'):
     return x, y, crop_w, crop_h
 
 
+def score_candidate(start, end, audio_activity, audio_peaks):
+    """Transparent 0–100 editing heuristic; it is not a prediction of virality."""
+    duration = max(1.0, end - start)
+    active_seconds = sum(max(0.0, min(end, b) - max(start, a)) for a, b in audio_activity)
+    active_ratio = min(1.0, active_seconds / duration)
+    hook_end = min(end, start + 3.0)
+    hook_duration = max(.1, hook_end - start)
+    hook_active = sum(max(0.0, min(hook_end, b) - max(start, a)) for a, b in audio_activity)
+    hook_ratio = min(1.0, hook_active / hook_duration)
+    hook_peak = any(start <= peak <= hook_end for peak in audio_peaks)
+
+    # Proxies inspired by common short-form scoring dimensions: opening hook,
+    # continuity/flow, audible energy events, and watchable clip length.
+    hook_score = min(100.0, 20.0 + hook_ratio * 65.0 + (25.0 if hook_peak else 0.0))
+    flow_score = active_ratio * 100.0
+    peak_count = sum(start <= peak <= end for peak in audio_peaks)
+    excitement_score = min(100.0, peak_count * 18.0)
+    pacing_score = max(20.0, 100.0 - 5.0 * max(0.0, 18.0 - duration)
+                       - 4.0 * max(0.0, duration - 32.0))
+    score = round(.28 * hook_score + .28 * flow_score
+                  + .29 * excitement_score + .15 * pacing_score)
+    return max(0, min(100, score))
+
+
 def analyze(vid, min_duration=12, max_duration=35, clip_count=0, output_format='vertical', camera_position='auto'):
     try:
         if vid in CANCELLED:
@@ -218,14 +242,10 @@ def analyze(vid, min_duration=12, max_duration=35, clip_count=0, output_format='
         for start in range(0, max(1, int(duration - min_duration) + 1), stride):
             end = min(duration, start + window)
             if end - start >= min_duration:
-                active_seconds = sum(max(0.0, min(end, b) - max(start, a)) for a, b in audio_activity)
-                active_ratio = active_seconds / max(1.0, end - start)
-                peak_count = sum(start <= peak <= end for peak in audio_peaks)
-                # Heuristic ranking: retain audible passages and favor energetic moments.
-                score = min(98, 45 + int((end - start) / 4) + int(active_ratio * 20) + min(20, peak_count * 3))
+                score = score_candidate(start, end, audio_activity, audio_peaks)
                 candidates.append((start, end, score))
         if not candidates:
-            candidates = [(0, duration, min(90, 55 + int(duration / 3)))]
+            candidates = [(0, duration, score_candidate(0, duration, audio_activity, audio_peaks))]
         selected = []
         for item in sorted(candidates, key=lambda x: x[2], reverse=True):
             if all(max(0, min(item[1], b) - max(item[0], a)) / min(item[1] - item[0], b - a) < .3 for a, b, _ in selected):
@@ -238,7 +258,6 @@ def analyze(vid, min_duration=12, max_duration=35, clip_count=0, output_format='
                   stage=f'{len(selected)} segment(s) distinct(s) retenu(s)')
         created = 0
         render_started = time.time()
-        from backend.effects import make_impact_sound
         for index, (start, end, score) in enumerate(sorted(selected)):
             if vid in CANCELLED:
                 return
@@ -286,23 +305,6 @@ def analyze(vid, min_duration=12, max_duration=35, clip_count=0, output_format='
                     cut_graph_parts.append('[a0]anull[cuta]')
             cut_graph=';'.join(cut_graph_parts)
             export_start = keep[0][0]
-            # Translate source-time energy peaks into the concatenated output timeline.
-            event_times = []
-            output_offset = 0.0
-            for a, b in keep:
-                event_times.extend(output_offset + peak - a for peak in audio_peaks if a <= peak <= b)
-                output_offset += b - a
-            if not event_times:
-                cursor = 0.0
-                for a, b in keep:
-                    event_times.append(cursor + (b - a) / 2)
-                    cursor += b - a
-            event_times = sorted(set(max(0.0, min(kept_seconds - .05, t)) for t in event_times))[:6]
-            pulses = [f'max(0,1-abs(on-{round(t * 30)})/48)' for t in event_times]
-            pulse = pulses[0]
-            for next_pulse in pulses[1:]:
-                pulse = f'max({pulse},{next_pulse})'
-            zoom = f'1+0.30*({pulse})'
             camera_layout = bool(face_box)
             if camera_layout:
                 x, y, cw, ch = face_box
@@ -310,42 +312,28 @@ def analyze(vid, min_duration=12, max_duration=35, clip_count=0, output_format='
                          'scale=1080:730:force_original_aspect_ratio=increase,crop=1080:730[camtop];'
                          '[game]scale=1080:1190:force_original_aspect_ratio=increase,crop=1080:1190[gamebase]')
                 base_graph = graph + ';[camtop][gamebase]vstack=inputs=2,setsar=1[baseout]'
-                zoom_graph = (graph + f";[gamebase]fps=30,zoompan=z='{zoom}':d=1:s=1080x1190:fps=30[gamezoom];"
-                              '[camtop][gamezoom]vstack=inputs=2,setsar=1[renderbase]')
                 if face_detected:
                     camera_note = 'Webcam détectée · cadrage supérieur (38%)'
             else:
                 if output_format == 'horizontal':
                     graph = '[cutv]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1[layout]'
                     camera_note = 'Format horizontal · cadrage source'
-                    width, height = 1920, 1080
                 else:
                     graph = '[cutv]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1[layout]'
                     camera_note = 'Webcam non détectée · cadrage vertical centré'
-                    width, height = 1080, 1920
                 base_graph = graph + ';[layout]null[baseout]'
-                zoom_graph = (graph + f";[layout]fps=30,zoompan=z='{zoom}':d=1:s={width}x{height}:fps=30[renderbase]")
-            caption = 'EPIC !' if score >= 80 else ('WOW ?!' if score >= 65 else 'MOMENT FORT')
-            zoom_only_video = (f"{zoom_graph};[renderbase]eq=saturation=1.08:contrast=1.03,"
-                               "drawbox=x=0:y=0:w=iw:h=ih:color=white@0.22:t=fill:enable='between(t,0.20,0.34)'[vout]")
-            advanced_video = (f"{zoom_graph};[renderbase]eq=saturation=1.10:contrast=1.05,"
-                              f"drawbox=x=0:y=0:w=iw:h=ih:color=white@0.22:t=fill:enable='between(t,0.20,0.34)',drawtext=text='{caption}':fontcolor=white:fontsize=88:"
-                              "borderw=6:bordercolor=black:box=1:boxcolor=black@0.40:boxborderw=18:"
-                              "x=(w-text_w)/2:y=h*0.26:enable='between(t,0.25,2.8)'[vout]")
-            set_video(vid, f'Montage {index + 1}/{len(selected)}', 58 + int(index / max(1, len(selected)) * 38), stage=camera_note)
-            sfx_path = DATA / ('impact_heavy_v2.wav' if score >= 75 else 'impact_soft_v2.wav')
-            make_impact_sound(sfx_path, low=score < 75)
-            delay_ms = int(min(max(0.0, kept_seconds - .1), event_times[0]) * 1000)
+            video_graph = base_graph + ';[baseout]fps=30[vout]'
+            filter_graph = cut_graph + ';' + video_graph
             if audio_activity:
-                audio_filter = (f"[cuta]loudnorm=I=-16:TP=-1.5:LRA=11[a0];[1:a]volume=1.0,"
-                                f"adelay={delay_ms}|{delay_ms}[fx];[a0][fx]amix=inputs=2:duration=first:"
-                                "dropout_transition=0:weights='1 1.65':normalize=0,alimiter=limit=0.96[aout]")
-            else:
-                audio_filter = (f'[1:a]volume=1.0,adelay={delay_ms}|{delay_ms},apad=pad_dur={kept_seconds:.3f},'
-                                f'atrim=duration={kept_seconds:.3f}[aout]')
+                filter_graph += ';[cuta]anull[aout]'
+            set_video(vid, f'Montage {index + 1}/{len(selected)}', 58 + int(index / max(1, len(selected)) * 38), stage=camera_note)
             common = ['ffmpeg', '-hide_banner', '-loglevel', 'error', '-y', '-ss', f'{start:.3f}', '-i', str(source),
-                      '-i', str(sfx_path), '-t', f'{kept_seconds:.3f}', '-filter_complex', cut_graph + ';' + advanced_video + ';' + audio_filter,
-                      '-map', '[vout]', '-map', '[aout]', '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart']
+                      '-t', f'{kept_seconds:.3f}', '-filter_complex', filter_graph, '-map', '[vout]',
+                      '-movflags', '+faststart']
+            if audio_activity:
+                common += ['-map', '[aout]', '-c:a', 'aac', '-b:a', '192k']
+            else:
+                common += ['-an']
             cmd = common + ['-c:v', 'h264_nvenc', '-preset', 'p5', '-cq', '21', str(output)]
             result = run(cmd, job_id=vid)
             if vid in CANCELLED:
@@ -353,20 +341,6 @@ def analyze(vid, min_duration=12, max_duration=35, clip_count=0, output_format='
             if result.returncode:
                 cmd = common + ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', str(output)]
                 result = run(cmd, job_id=vid)
-            if result.returncode:
-                # If drawtext is unavailable, retain the moving zoom and audio effect.
-                zoom_common = common.copy()
-                zoom_common[zoom_common.index('-filter_complex') + 1] = cut_graph + ';' + zoom_only_video + ';' + audio_filter
-                zoom_fallback = zoom_common + ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', str(output)]
-                result = run(zoom_fallback, job_id=vid)
-            if result.returncode:
-                # Last resort only: preserve a playable vertical/horizontal render.
-                simple_graph = base_graph + ';[baseout]fps=30[vout];' + audio_filter
-                fallback = ['ffmpeg', '-hide_banner', '-loglevel', 'error', '-y', '-ss', f'{start:.3f}', '-i', str(source),
-                            '-i', str(sfx_path), '-t', f'{kept_seconds:.3f}', '-filter_complex', cut_graph + ';' + simple_graph,
-                            '-map', '[vout]', '-map', '[aout]', '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart',
-                            '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', str(output)]
-                result = run(fallback, job_id=vid)
             if vid in CANCELLED:
                 output.unlink(missing_ok=True); return
             if result.returncode or not output.exists() or output.stat().st_size < 1024:
