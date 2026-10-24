@@ -285,6 +285,7 @@ def analyze(vid, min_duration=12, max_duration=35, clip_count=0, output_format='
                 if audio_activity:
                     cut_graph_parts.append('[a0]anull[cuta]')
             cut_graph=';'.join(cut_graph_parts)
+            export_start = keep[0][0]
             # Translate source-time energy peaks into the concatenated output timeline.
             event_times = []
             output_offset = 0.0
