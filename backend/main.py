@@ -40,7 +40,7 @@ def analyze(vid):
     cmd[cmd.index('h264_nvenc')]='libx264'; cmd[cmd.index('p5')]='veryfast'; cmd[cmd.index('21')]='23'; res=run(cmd)
    if res.returncode: continue
    title=['Le moment que personne n’attendait 😱','C’est allé beaucoup trop vite 🔥','Quel clutch incroyable 🚀'][len(selected)%3]
-   with lock: db.execute('INSERT INTO clips VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',(cid,vid,title,start,end,score,'Action',str(out),0,'',time.time())); db.commit()
+   with lock: db.execute('INSERT INTO clips VALUES(?,?,?,?,?,?,?,?,?,?,?)',(cid,vid,title,start,end,score,'Action',str(out),0,'',time.time())); db.commit()
   with lock: db.execute("UPDATE videos SET status='Terminé',progress=100 WHERE id=?",(vid,)); db.commit()
  except Exception as e:
   with lock: db.execute("UPDATE videos SET status='Erreur',error=? WHERE id=?",(str(e),vid)); db.commit()
