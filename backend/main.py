@@ -182,8 +182,8 @@ def fallback_webcam_region(source, position='bottom_left'):
         width, height = int(stream['width']), int(stream['height'])
     except Exception:
         return None
-    aspect = 1080 / 700
-    crop_w = min(width, int(width * .38))
+    aspect = 1080 / 730
+    crop_w = min(width, int(width * .34))
     crop_h = min(height, int(crop_w / aspect))
     x = width - crop_w if position.endswith('right') else 0
     y = 0 if position.startswith('top') else height - crop_h
@@ -307,13 +307,13 @@ def analyze(vid, min_duration=12, max_duration=35, clip_count=0, output_format='
             if camera_layout:
                 x, y, cw, ch = face_box
                 graph = (f'[cutv]split=2[cam][game];[cam]crop={cw}:{ch}:{x}:{y},'
-                         'scale=1080:700:force_original_aspect_ratio=increase,crop=1080:700[camtop];'
-                         '[game]scale=1080:1220:force_original_aspect_ratio=increase,crop=1080:1220[gamebase]')
+                         'scale=1080:730:force_original_aspect_ratio=increase,crop=1080:730[camtop];'
+                         '[game]scale=1080:1190:force_original_aspect_ratio=increase,crop=1080:1190[gamebase]')
                 base_graph = graph + ';[camtop][gamebase]vstack=inputs=2,setsar=1[baseout]'
                 zoom_graph = (graph + f";[gamebase]fps=30,zoompan=z='{zoom}':d=1:s=1080x1190:fps=30[gamezoom];"
                               '[camtop][gamezoom]vstack=inputs=2,setsar=1[renderbase]')
                 if face_detected:
-                    camera_note = 'Webcam détectée · caméra entière en haut (38%)'
+                    camera_note = 'Webcam détectée · cadrage supérieur (38%)'
             else:
                 if output_format == 'horizontal':
                     graph = '[cutv]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1[layout]'

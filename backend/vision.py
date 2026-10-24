@@ -71,9 +71,11 @@ def find_webcam_region(video_path: Path, start_seconds: float, duration: float):
         face_w, face_h = max(f[2] for f in faces), max(f[3] for f in faces)
         aspect = 1080 / 730
         center_x, center_y = (x0+x1)/2, (y0+y1)/2
-        # Capture the whole webcam box around the detected face, not a tight headshot.
-        cw = max((x1-x0) + face_w*3.0, face_w*5.5, width*.34)
-        ch = max((y1-y0) + face_h*2.4, face_h*4.0, cw/aspect)
+        # Estimate the webcam panel around a persistent face. Haar boxes cover only
+        # facial features, so use a moderate margin rather than blowing the crop up
+        # until surrounding gameplay becomes part of the camera panel.
+        cw = max((x1-x0) + face_w*2.2, face_w*4.0, width*.32)
+        ch = max((y1-y0) + face_h*1.8, face_h*2.3, cw/aspect)
         cw = max(cw, ch*aspect)
         ch = cw/aspect
         if cw > width:
