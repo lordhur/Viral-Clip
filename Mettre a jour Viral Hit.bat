@@ -33,18 +33,21 @@ goto install_deps
 :bootstrap
 echo Ce dossier est une archive ZIP. Initialisation automatique unique...
 where curl.exe >nul 2>nul || (echo curl.exe est requis sur Windows 10/11.& exit /b 1)
-where tar.exe >nul 2>nul || (echo tar.exe est requis sur Windows 10/11.& exit /b 1)
 set "WORK=%TEMP%\ViralHitBootstrap_%RANDOM%"
 set "ZIP=%WORK%\source.zip"
+set "UNPACK=%WORK%\unpacked"
+echo Dossier local : %CD%
 mkdir "%WORK%" >nul 2>nul
+mkdir "%UNPACK%" >nul 2>nul
 curl.exe -fL --retry 3 --output "%ZIP%" "https://codeload.github.com/lordhur/Viral-Clip/zip/refs/heads/arena/2e402653-viral-clip"
-if errorlevel 1 (echo Telechargement GitHub impossible.& exit /b 1)
-tar.exe -xf "%ZIP%" -C "%WORK%"
-if errorlevel 1 (echo Extraction de l'archive impossible.& exit /b 1)
-for /d %%D in ("%WORK%\Viral-Clip-*") do call :copy_source "%%~fD"
-if errorlevel 1 exit /b 1
+if errorlevel 1 (echo ECHEC: telechargement GitHub. Verifiez votre connexion.& exit /b 1)
+python -c "import zipfile,sys; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])" "%ZIP%" "%UNPACK%"
+if errorlevel 1 (echo ECHEC: extraction Python de l'archive ZIP.& exit /b 1)
+for /d %%D in ("%UNPACK%\Viral-Clip-*") do call :copy_source "%%~fD"
+if errorlevel 1 (echo ECHEC: copie des fichiers. Fermez Viral Hit et relancez ce script.& exit /b 1)
+if not exist "update.py" (echo ECHEC: update.py absent apres extraction.& exit /b 1)
 python update.py --record-current
-if errorlevel 1 exit /b 1
+if errorlevel 1 (echo ECHEC: impossible d'enregistrer la version GitHub courante.& exit /b 1)
 rmdir /s /q "%WORK%" >nul 2>nul
 echo Initialisation terminee. Les prochaines mises a jour ne telechargeront que les fichiers modifies.
 exit /b 0
