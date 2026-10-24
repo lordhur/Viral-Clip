@@ -114,7 +114,52 @@ def run(cmd, timeout=3600, job_id=None, download=False):
                 ACTIVE_PROCESSES.pop(job_id, None)
 
 
-def analyze(vid, min_duration=12, max_duration=35, clip_count=0, output_format='vertical'):
+def detect_audio_activity(source, duration, vid):
+    """Return non-silent spans from local audio energy analysis, not word transcription."""
+    probe = run(['ffprobe', '-v', 'error', '-select_streams', 'a:0', '-show_entries', 'stream=index', '-of', 'csv=p=0', str(source)])
+    if not probe.stdout.strip():
+        return []
+    result = run(['ffmpeg', '-hide_banner', '-loglevel', 'info', '-nostats', '-i', str(source), '-vn',
+                  '-af', 'silencedetect=noise=-35dB:d=0.30', '-f', 'null', '-'], job_id=vid)
+    if vid in CANCELLED:
+        return []
+    silence_starts = [float(m) for m in re.findall(r'silence_start:\s*(-?\d+(?:\.\d+)?)', result.stdout)]
+    silence_ends = [float(m) for m in re.findall(r'silence_end:\s*(-?\d+(?:\.\d+)?)', result.stdout)]
+    if not silence_starts and not silence_ends:
+        return [(0.0, duration)]
+    silent = []
+    for i, start in enumerate(silence_starts):
+        end = silence_ends[i] if i < len(silence_ends) else duration
+        silent.append((max(0.0, start), min(duration, end)))
+    active = []
+    cursor = 0.0
+    for start, end in sorted(silent):
+        if start > cursor + .08:
+            active.append((cursor, start))
+        cursor = max(cursor, end)
+    if duration > cursor + .08:
+        active.append((cursor, duration))
+    return active or [(0.0, duration)]
+
+
+def fallback_webcam_region(source, position='bottom_left'):
+    if position in ('none', 'auto'):
+        position = 'bottom_left'
+    probe = run(['ffprobe', '-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height', '-of', 'json', str(source)])
+    try:
+        stream = json.loads(probe.stdout)['streams'][0]
+        width, height = int(stream['width']), int(stream['height'])
+    except Exception:
+        return None
+    aspect = 1080 / 520
+    crop_w = min(width, int(width * .30))
+    crop_h = min(height, int(crop_w / aspect))
+    x = width - crop_w if position.endswith('right') else 0
+    y = 0 if position.startswith('top') else height - crop_h
+    return x, y, crop_w, crop_h
+
+
+def analyze(vid, min_duration=12, max_duration=35, clip_count=0, output_format='vertical', camera_position='auto'):
     try:
         if vid in CANCELLED:
             return
@@ -128,7 +173,12 @@ def analyze(vid, min_duration=12, max_duration=35, clip_count=0, output_format='
         if duration < min_duration:
             raise RuntimeError(f'Vidéo trop courte : {duration:.1f}s (minimum demandé : {min_duration}s).')
 
-        # A coarse, deterministic timeline sampler. It is not a semantic AI detector.
+        set_video(vid, 'Analyse en cours', 44, stage='Analyse audio · détection des silences et pics sonores')
+        audio_activity = detect_audio_activity(source, duration, vid)
+        if vid in CANCELLED:
+            return
+
+        # Timeline sampling is biased toward audible activity, but is not speech transcription.
         window = min(max_duration, duration)
         if clip_count > 0:
             window = min(window, max(min_duration, duration / (1 + .72 * (clip_count - 1))))
@@ -137,7 +187,9 @@ def analyze(vid, min_duration=12, max_duration=35, clip_count=0, output_format='
         for start in range(0, max(1, int(duration - min_duration) + 1), stride):
             end = min(duration, start + window)
             if end - start >= min_duration:
-                score = min(94, 48 + int((end - start) / 3) + ((start // 7) % 20))
+                active_seconds = sum(max(0.0, min(end, b) - max(start, a)) for a, b in audio_activity)
+                active_ratio = active_seconds / max(1.0, end - start)
+                score = min(98, 42 + int((end - start) / 3) + ((start // 7) % 14) + int(active_ratio * 28))
                 candidates.append((start, end, score))
         if not candidates:
             candidates = [(0, duration, min(90, 55 + int(duration / 3)))]
@@ -161,21 +213,62 @@ def analyze(vid, min_duration=12, max_duration=35, clip_count=0, output_format='
                       stage=f'Export FFmpeg · extrait {index + 1}/{len(selected)}')
             clip_id = str(uuid.uuid4())
             output = OUTPUT / f'{clip_id}.mp4'
-            face_box = find_webcam_region(source, start, end - start) if output_format == 'vertical' else None
+            # Keep audible phrases and collapse pauses longer than 0.35 s into real jump cuts.
+            keep = []
+            for active_start, active_end in audio_activity:
+                left, right = max(start, active_start - .12), min(end, active_end + .12)
+                if right <= left:
+                    continue
+                if keep and left - keep[-1][1] <= .35:
+                    keep[-1] = (keep[-1][0], right)
+                else:
+                    keep.append((left, right))
+            kept_seconds = sum(b-a for a,b in keep)
+            if not keep or kept_seconds < max(5, min_duration * .45):
+                keep = [(start, end)]
+                kept_seconds = end-start
+            face_box = find_webcam_region(source, start, end - start) if output_format == 'vertical' and camera_position == 'auto' else None
+            face_detected = bool(face_box)
+            if output_format == 'vertical' and not face_box and camera_position != 'none':
+                fallback_position = 'bottom_left' if camera_position == 'auto' else camera_position
+                face_box = fallback_webcam_region(source, fallback_position)
+                if face_box:
+                    camera_note = f'Webcam : recadrage de secours {fallback_position.replace("_", " ")}'
+            cut_graph_parts = []
+            for n,(a,b) in enumerate(keep):
+                rel_a,rel_b = max(0,a-start),max(0,b-start)
+                cut_graph_parts.append(f'[0:v]trim=start={rel_a:.3f}:end={rel_b:.3f},setpts=PTS-STARTPTS[v{n}]')
+                if audio_activity:
+                    cut_graph_parts.append(f'[0:a]atrim=start={rel_a:.3f}:end={rel_b:.3f},asetpts=PTS-STARTPTS[a{n}]')
+            if len(keep)>1:
+                if audio_activity:
+                    concat_inputs=''.join(f'[v{n}][a{n}]' for n in range(len(keep)))
+                    cut_graph_parts.append(f'{concat_inputs}concat=n={len(keep)}:v=1:a=1[cutv][cuta]')
+                else:
+                    concat_inputs=''.join(f'[v{n}]' for n in range(len(keep)))
+                    cut_graph_parts.append(f'{concat_inputs}concat=n={len(keep)}:v=1:a=0[cutv]')
+            else:
+                cut_graph_parts.append('[v0]null[cutv]')
+                if audio_activity:
+                    cut_graph_parts.append('[a0]anull[cuta]')
+            cut_graph=';'.join(cut_graph_parts)
+            export_start=keep[0][0]
+            export_end=export_start+kept_seconds
             if face_box:
                 x, y, cw, ch = face_box
-                graph = (f'[0:v]split=2[cam][game];[cam]crop={cw}:{ch}:{x}:{y},'
+                graph = (f'[cutv]split=2[cam][game];[cam]crop={cw}:{ch}:{x}:{y},'
                          'scale=1080:520:force_original_aspect_ratio=increase,crop=1080:520[camtop];'
                          ' [game]scale=1080:1400:force_original_aspect_ratio=increase,crop=1080:1400[gameplay];'
                          '[camtop][gameplay]vstack=inputs=2,setsar=1[layout]')
                 basic_video = 'scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1'
-                camera_note = 'Webcam détectée · caméra en haut'
+                if face_detected:
+                    camera_note = 'Webcam détectée · caméra en haut'
             elif output_format == 'horizontal':
-                graph = '[0:v]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1[layout]'
+                graph = '[cutv]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1[layout]'
                 basic_video = 'scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1'
                 camera_note = 'Format horizontal · cadrage source'
             else:
-                graph = '[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1[layout]'
+                graph = '[cutv]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1[layout]'
                 basic_video = 'scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1'
                 camera_note = 'Webcam non détectée · cadrage vertical centré'
             width, height = (1920, 1080) if output_format == 'horizontal' else (1080, 1920)
@@ -190,13 +283,12 @@ def analyze(vid, min_duration=12, max_duration=35, clip_count=0, output_format='
             set_video(vid, f'Montage {index + 1}/{len(selected)}', 58 + int(index / max(1, len(selected)) * 38), stage=camera_note)
             sfx_path = DATA / ('impact_heavy_v2.wav' if score >= 75 else 'impact_soft_v2.wav')
             make_impact_sound(sfx_path, low=score < 75)
-            audio_probe = run(['ffprobe', '-v', 'error', '-select_streams', 'a:0', '-show_entries', 'stream=index', '-of', 'csv=p=0', str(source)])
-            if audio_probe.stdout.strip():
-                audio_filter = "[0:a]loudnorm=I=-16:TP=-1.5:LRA=11[a0];[1:a]volume=0.85,adelay=420|420[fx];[a0][fx]amix=inputs=2:duration=first:dropout_transition=0:weights='1 1.45':normalize=0,alimiter=limit=0.96[aout]"
+            if audio_activity:
+                audio_filter = "[cuta]loudnorm=I=-16:TP=-1.5:LRA=11[a0];[1:a]volume=0.85,adelay=420|420[fx];[a0][fx]amix=inputs=2:duration=first:dropout_transition=0:weights='1 1.45':normalize=0,alimiter=limit=0.96[aout]"
             else:
-                audio_filter = f'[1:a]volume=0.85,adelay=420|420,apad=pad_dur={end-start:.3f},atrim=duration={end-start:.3f}[aout]'
+                audio_filter = f'[1:a]volume=0.85,adelay=420|420,apad=pad_dur={kept_seconds:.3f},atrim=duration={kept_seconds:.3f}[aout]'
             common = ['ffmpeg', '-hide_banner', '-loglevel', 'error', '-y', '-ss', f'{start:.3f}', '-i', str(source),
-                      '-i', str(sfx_path), '-t', f'{end-start:.3f}', '-filter_complex', advanced_video + ';' + audio_filter,
+                      '-i', str(sfx_path), '-t', f'{kept_seconds:.3f}', '-filter_complex', cut_graph + ';' + advanced_video + ';' + audio_filter,
                       '-map', '[vout]', '-map', '[aout]', '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart']
             cmd = common + ['-c:v', 'h264_nvenc', '-preset', 'p5', '-cq', '21', str(output)]
             result = run(cmd, job_id=vid)
@@ -208,14 +300,14 @@ def analyze(vid, min_duration=12, max_duration=35, clip_count=0, output_format='
             if result.returncode:
                 # If drawtext is unavailable, retain the moving zoom and audio effect.
                 zoom_common = common.copy()
-                zoom_common[zoom_common.index('-filter_complex') + 1] = zoom_only_video + ';' + audio_filter
+                zoom_common[zoom_common.index('-filter_complex') + 1] = cut_graph + ';' + zoom_only_video + ';' + audio_filter
                 zoom_fallback = zoom_common + ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', str(output)]
                 result = run(zoom_fallback, job_id=vid)
             if result.returncode:
                 # Last resort only: preserve a playable vertical/horizontal render.
-                simple_graph = f'[0:v]{basic_video},fps=30[vout];{audio_filter}'
+                simple_graph = f'[cutv]{basic_video},fps=30[vout];{audio_filter}'
                 fallback = ['ffmpeg', '-hide_banner', '-loglevel', 'error', '-y', '-ss', f'{start:.3f}', '-i', str(source),
-                            '-i', str(sfx_path), '-t', f'{end-start:.3f}', '-filter_complex', simple_graph,
+                            '-i', str(sfx_path), '-t', f'{kept_seconds:.3f}', '-filter_complex', cut_graph + ';' + simple_graph,
                             '-map', '[vout]', '-map', '[aout]', '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart',
                             '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', str(output)]
                 result = run(fallback, job_id=vid)
@@ -237,7 +329,7 @@ def analyze(vid, min_duration=12, max_duration=35, clip_count=0, output_format='
             title = ['Moment fort détecté', 'Séquence à partager', 'Extrait vidéo'][index % 3]
             with lock:
                 db.execute('INSERT INTO clips(id,video_id,title,start,end,score,category,path,rating,feedback,created,output_format) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
-                           (clip_id, vid, title, start, end, score, 'Action', str(output), 0, '', time.time(), output_format))
+                           (clip_id, vid, title, export_start, export_start + kept_seconds, score, 'Action', str(output), 0, '', time.time(), output_format))
                 db.commit()
             created += 1
             elapsed = time.time() - render_started
@@ -253,21 +345,21 @@ def analyze(vid, min_duration=12, max_duration=35, clip_count=0, output_format='
             set_video(vid, 'Erreur', 100, str(exc), stage='Erreur')
 
 
-def enqueue(path, name, min_duration=12, max_duration=35, clip_count=0, output_format='vertical', vid=None):
+def enqueue(path, name, min_duration=12, max_duration=35, clip_count=0, output_format='vertical', camera_position='auto', vid=None):
     vid = vid or str(uuid.uuid4())
     CANCELLED.discard(vid)
     with lock:
         db.execute("INSERT OR REPLACE INTO videos(id,name,path,status,progress,error,stage) VALUES(?,?,?,?,?,NULL,?)",
                    (vid, name, str(path), 'Analyse en cours', 40, 'Lecture des métadonnées'))
         db.commit()
-    threading.Thread(target=analyze, args=(vid, min_duration, max_duration, clip_count, output_format), daemon=True).start()
+    threading.Thread(target=analyze, args=(vid, min_duration, max_duration, clip_count, output_format, camera_position), daemon=True).start()
     return vid
 
 
 @app.post('/api/import')
 async def upload(file: UploadFile = File(...), min_duration: int = Form(12), max_duration: int = Form(35),
-                 clip_count: int = Form(0), output_format: str = Form('vertical')):
-    if min_duration < 5 or max_duration < min_duration or max_duration > 180 or clip_count < 0 or output_format not in ('vertical', 'horizontal'):
+                 clip_count: int = Form(0), output_format: str = Form('vertical'), camera_position: str = Form('auto')):
+    if min_duration < 5 or max_duration < min_duration or max_duration > 180 or clip_count < 0 or output_format not in ('vertical', 'horizontal') or camera_position not in ('auto','bottom_left','bottom_right','top_left','top_right','none'):
         raise HTTPException(400, 'Paramètres de clips invalides.')
     name = Path(file.filename or 'video.mp4').name
     target = INPUT / f'{uuid.uuid4()}_{name}'
@@ -275,7 +367,7 @@ async def upload(file: UploadFile = File(...), min_duration: int = Form(12), max
         with target.open('wb') as output:
             while chunk := await file.read(8 * 1024 * 1024):
                 output.write(chunk)
-        return {'id': enqueue(target, name, min_duration, max_duration, clip_count, output_format), 'name': name}
+        return {'id': enqueue(target, name, min_duration, max_duration, clip_count, output_format, camera_position), 'name': name}
     except Exception as exc:
         target.unlink(missing_ok=True)
         raise HTTPException(400, str(exc))
@@ -287,9 +379,10 @@ class Link(BaseModel):
     max_duration: int = Field(35, ge=5, le=180)
     clip_count: int = Field(0, ge=0)
     output_format: str = 'vertical'
+    camera_position: str = 'auto'
 
 
-def download_link(vid, url, min_duration, max_duration, clip_count, output_format):
+def download_link(vid, url, min_duration, max_duration, clip_count, output_format, camera_position):
     stem = uuid.uuid4().hex
     template = str(INPUT / (stem + '.%(ext)s'))
     try:
@@ -303,7 +396,7 @@ def download_link(vid, url, min_duration, max_duration, clip_count, output_forma
         chosen = next((f for f in files if f.suffix.lower() == '.mp4'), files[0])
         set_video(vid, 'Analyse en cours', 38, path=chosen, stage='Téléchargement terminé · analyse vidéo')
         if vid not in CANCELLED:
-            analyze(vid, min_duration, max_duration, clip_count, output_format)
+            analyze(vid, min_duration, max_duration, clip_count, output_format, camera_position)
     except Exception as exc:
         if vid not in CANCELLED:
             set_video(vid, 'Erreur', 100, str(exc), stage='Erreur')
@@ -313,7 +406,7 @@ def download_link(vid, url, min_duration, max_duration, clip_count, output_forma
 def link(data: Link):
     if not data.url.startswith(('https://', 'http://')):
         raise HTTPException(400, 'Lien invalide')
-    if data.max_duration < data.min_duration or data.output_format not in ('vertical', 'horizontal'):
+    if data.max_duration < data.min_duration or data.output_format not in ('vertical', 'horizontal') or data.camera_position not in ('auto','bottom_left','bottom_right','top_left','top_right','none'):
         raise HTTPException(400, 'Paramètres de clips invalides.')
     vid = str(uuid.uuid4())
     CANCELLED.discard(vid)
@@ -321,7 +414,7 @@ def link(data: Link):
         db.execute("INSERT INTO videos(id,name,path,status,progress,stage) VALUES(?,?,?,?,?,?)",
                    (vid, data.url, '', 'Téléchargement', 3, 'Démarrage du téléchargement'))
         db.commit()
-    threading.Thread(target=download_link, args=(vid, data.url, data.min_duration, data.max_duration, data.clip_count, data.output_format), daemon=True).start()
+    threading.Thread(target=download_link, args=(vid, data.url, data.min_duration, data.max_duration, data.clip_count, data.output_format, data.camera_position), daemon=True).start()
     return {'id': vid, 'status': 'Téléchargement lancé'}
 
 

@@ -10,13 +10,13 @@ Pour une copie Git, `Mettre a jour Viral Hit.bat` récupère les nouveautés san
 
 ## Fonctions actuelles
 
-Import vidéo avec progression réelle côté interface (pourcentage, vitesse, estimation), téléchargements yt-dlp avec progression, suivi des étapes d'analyse et de montage, arrêt d'un transfert, arrêt/suppression d'une tâche, suppression d'une analyse terminée avec ses clips et sa source, réglages du nombre/durée/format, encodage NVENC avec repli x264, lecteur des clips, notes et planification locale. Le montage applique un zoom progressif, une courte accroche textuelle et un impact sonore synthétisé localement.
+Import vidéo avec progression réelle côté interface (pourcentage, vitesse, estimation), téléchargements yt-dlp avec progression, suivi des étapes d'analyse et de montage, arrêt d'un transfert, arrêt/suppression d'une tâche, suppression d'une analyse terminée avec ses clips et sa source, réglages du nombre/durée/format, encodage NVENC avec repli x264, lecteur des clips, notes et planification locale. Le montage applique un zoom progressif, une courte accroche textuelle, un impact sonore synthétisé localement et un autocut fondé sur les silences du signal audio. La webcam peut être détectée automatiquement; un choix de coin permet aussi de cadrer une webcam incrustée si OpenCV ne la trouve pas.
 
 La détection du visage de webcam est best-effort et optionnelle (OpenCV Haar). Si OpenCV ne s'installe pas, ou si aucun visage persistant n'est détecté dans le même emplacement, Viral Hit utilise le recadrage vertical central. Aucun système ne peut garantir l'extraction correcte de webcam pour toute vidéo sans un détecteur spécialisé et/ou une validation utilisateur.
 
 ## Limites à connaître
 
-Les moments sélectionnés sont des fenêtres uniformes heuristiques, pas des moments sémantiquement détectés par Whisper, YOLO ou CLIP. Les accroches et le son généré sont des effets originaux génériques, pas une bibliothèque de mèmes/samples téléchargés ni une compréhension du contexte de chaque clip. Il n'y a pas encore de sous-titres transcrits, de détection HUD/jeu, de publication réseau, ni de calendrier interactif complet. La planification enregistre des créneaux, mais ne publie pas. L'API de publication n'est pas contournée.
+Les moments sélectionnés sont des fenêtres uniformes heuristiques, pas des moments sémantiquement détectés par Whisper, YOLO ou CLIP. L’autocut s’appuie sur la détection de silences FFmpeg (niveau audio), pas sur une transcription mot à mot ni sur un modèle de reconnaissance de parole. Les accroches et le son généré sont des effets originaux génériques, pas une bibliothèque de mèmes/samples téléchargés ni une compréhension du contexte de chaque clip. Il n'y a pas encore de sous-titres transcrits, de détection HUD/jeu, de publication réseau, ni de calendrier interactif complet. La planification enregistre des créneaux, mais ne publie pas. L'API de publication n'est pas contournée.
 
 ## Backend séparé (diagnostic)
 
